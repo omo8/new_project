@@ -6,7 +6,8 @@ from PyQt5.QtCore import QThread, pyqtSignal
 class VmixHttpTallyThread(QThread):
     tally_data_signal = pyqtSignal(dict)  # Emits {'pgm_inputs': [active_input_num], 'pvw_inputs': [preview_input_num]}
     status_signal = pyqtSignal(str)
-    error_signal = pyqtSignal(str)
+    error_signal = pyqtSignal(str) # For general, often transient, errors
+    critical_error_signal = pyqtSignal(str, str) # For more severe, persistent, or setup errors (title, message)
 
     def __init__(self, host='127.0.0.1', port=8088, polling_interval_ms=250, parent=None):
         super().__init__(parent)
@@ -82,7 +83,7 @@ class VmixHttpTallyThread(QThread):
         self.status_signal.emit("vMix HTTP Tally thread definitively stopped.")
 
 if __name__ == '__main__':
-    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtWidgets import QApplication, QTimer # Added QTimer for the test
     import sys
 
     app = QApplication(sys.argv)

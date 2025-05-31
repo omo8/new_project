@@ -21,6 +21,27 @@ The application streams the final output (video, and audio from NDI Loopback) to
     -   NDI Loopback (Video + Audio) via `ndi-python`.
     -   vMix Virtual Camera (Video-only) via OpenCV and `pygrabber`.
     -   Generic OpenCV source (Video-only, e.g., webcam, NDI name if OpenCV supports it).
+        #### NDI Source Handling in "NDI Virtual Input (OpenCV)" Mode
+        The "NDI Virtual Input (OpenCV)" mode provides a way to capture video sources using OpenCV's `cv2.VideoCapture()` function. This can include standard webcams, video files, and potentially NDI sources, depending on your OpenCV installation and system configuration.
+        **Numerical Indices vs. Name Strings:**
+        *   **Numerical Indices:** OpenCV can always access cameras using numerical indices (e.g., 0, 1, 2, ...). The first camera detected by the system is usually index 0, the second is 1, and so on. The order can sometimes be unpredictable, especially if you have multiple USB cameras or virtual cameras.
+        *   **Camera Name Strings:** Some OpenCV backends (especially on Windows with `cv2.CAP_DSHOW` or when built with appropriate GStreamer/FFmpeg support) can open cameras using their exact name as listed by the system (e.g., "Logitech BRIO", "vMix Video").
+        **Prerequisites for OpenCV to Recognize NDI Names Directly:**
+        For OpenCV to open an NDI source directly by its network name (e.g., "MYCOMPUTER (OBS)"), OpenCV must be compiled with a backend that supports NDI. This typically means:
+        1.  **NDI SDK Installed:** The NDI SDK and runtime libraries must be installed on the system where the application is running.
+        2.  **OpenCV Built with NDI-enabled FFmpeg or GStreamer:** The FFmpeg or GStreamer libraries that OpenCV uses for video I/O must themselves be compiled with NDI support enabled. Standard pre-built OpenCV packages (e.g., from `pip install opencv-python`) often *do not* include an NDI-enabled FFmpeg/GStreamer backend by default. You might need to compile OpenCV from source with these dependencies configured or find a pre-built package that explicitly states NDI support.
+        If these prerequisites are not met, trying to open an NDI source by its network name directly in OpenCV will likely fail.
+        **Recommended Method: NDI Virtual Input Tool**
+        The most reliable way to make an NDI source available to generic OpenCV applications (like this mode) is to use the **NDI Virtual Input** tool (part of the NDI Tools suite, available from [NDI.tv](https://ndi.tv/tools/)).
+        1.  Run the NDI Virtual Input tool.
+        2.  In the system tray, right-click the NDI Virtual Input icon.
+        3.  Select the desired NDI network source from the list.
+        4.  This NDI source will now appear to the system as a standard webcam (e.g., "NewTek NDI Video"). The exact name can vary.
+        Once an NDI source is exposed as a virtual webcam via NDI Virtual Input, you can then use its assigned name (if your OpenCV backend supports names) or its numerical index in the "NDI/Cam Index/Name (OpenCV)" field of this application.
+        **Finding the Correct Index or Name:**
+        *   **Name:** If you're using NDI Virtual Input, the name will typically be something like "NewTek NDI Video". You can try entering this name directly. The `VmixVirtualCameraCaptureThread` in this application uses `pygrabber` (on Windows) to list camera names, which can help identify the correct name for the vMix Virtual Camera or NDI Virtual Input.
+        *   **Index:** If names don't work or you're unsure, you may need to find the correct numerical index. This can sometimes be trial and error (0, 1, 2...). Some systems or third-party tools may list camera indices. The application's log (when attempting to open an OpenCV source by index) might also provide clues or error messages if an index is invalid.
+        For dedicated NDI capture with richer features and more direct NDI SDK integration (including audio), the **"NDI Loopback"** mode of this application is generally recommended over the generic OpenCV mode for NDI sources.
 -   **Dynamic NDI Source Discovery:** Automatically discovers and lists available NDI sources for NDI Loopback mode.
 -   **vMix Tally Integration:**
     -   Displays Program (PGM) and Preview (PVW) tally status from vMix.
@@ -92,7 +113,7 @@ The application relies on several Python libraries. Ensure these are installed i
 2.  **Configure Program Source:**
     *   Select the desired video source from the "Program Source" dropdown:
         *   **NDI Loopback:** The "NDI Source" dropdown will populate with discovered NDI sources. Select one. Audio will be captured from this source.
-        *   **NDI Virtual Input (OpenCV):** Enter the NDI source name or camera index in the "NDI/Cam Index/Name (OpenCV)" field. This mode is video-only for SRT streaming.
+        *   **NDI Virtual Input (OpenCV):** Enter the NDI source name or camera index in the "NDI/Cam Index/Name (OpenCV)" field. This mode is video-only for SRT streaming. (See section "NDI Source Handling in "NDI Virtual Input (OpenCV)" Mode" under Features for more details).
         *   **vMix Virtual Camera:** The application will attempt to auto-detect the vMix Virtual Camera. This mode is video-only for SRT streaming.
 3.  **Configure Tally (Optional):**
     *   Select the "Tally Mode":
@@ -149,7 +170,7 @@ You can manually edit this file (when the application is closed) to change setti
 -   **Backend WebSocket:** Connection to a backend WebSocket URL is a placeholder and not implemented.
 -   **Windows Named Pipe for Audio:** The fallback for FFmpeg audio input on non-POSIX systems (Windows) uses a temporary file, which may not behave like a true pipe and could lead to issues with FFmpeg or disk space over very long sessions. A proper Windows named pipe implementation (`pywin32` or `ctypes`) would be more robust.
 -   **Error Reporting:** While critical error signals have been added to threads, the `QMessageBox` popups in `MainWindow` for these signals were not fully implemented/applied due to persistent diff tool failures during development. Users currently rely on status bar messages and the log view for error details.
--   **NDI Source Name in OpenCV Mode:** The "NDI Virtual Input (OpenCV)" mode relies on OpenCV's `VideoCapture` to handle NDI source names. This requires an OpenCV build with NDI support (often via FFmpeg backend compiled with NDI). If not available, only camera indices will work.
+-   **NDI Source Name in OpenCV Mode:** The "NDI Virtual Input (OpenCV)" mode's ability to resolve NDI source names directly (e.g., "MYCOMPUTER (OBS)") depends heavily on the user's OpenCV build and its backend configurations (e.g., if it's compiled with NDI-enabled FFmpeg). An intended code refinement within the `GenericOpenCVCaptureThread` to more intelligently handle numeric-like identifiers versus string names was not implemented due to technical difficulties during development. For best practices on using NDI sources with OpenCV, refer to the "NDI Source Handling in 'NDI Virtual Input (OpenCV)' Mode" section under "Features". Using the NDI Virtual Input tool to create a standard webcam interface for NDI sources is often more reliable with generic OpenCV setups. If direct name resolution fails, using the camera's numerical index is a fallback.
 -   **Configuration UI:** Not all configurable parameters (e.g., vMix host/port, polling intervals) have dedicated UI input fields; some must be changed in `config.json` directly.
 -   **Limited Dynamic Parameter Changes:** Changing some parameters (like audio sample rate for an active SRT stream) mid-stream might not cause FFmpeg to reconfigure without a full stream restart.
 
@@ -194,6 +215,27 @@ vMix의 탈리 정보는 다음을 통해 지원됩니다:
     -   `ndi-python`을 통한 NDI 루프백 (비디오 + 오디오).
     -   OpenCV 및 `pygrabber`를 통한 vMix 가상 카메라 (비디오 전용).
     -   일반 OpenCV 소스 (비디오 전용, 예: 웹캠, OpenCV가 지원하는 경우 NDI 이름).
+        #### "NDI 가상 입력 (OpenCV)" 모드에서의 NDI 소스 처리
+        "NDI 가상 입력 (OpenCV)" 모드는 OpenCV의 `cv2.VideoCapture()` 함수를 사용하여 비디오 소스를 캡처하는 방법을 제공합니다. 여기에는 표준 웹캠, 비디오 파일 및 OpenCV 설치 및 시스템 구성에 따라 NDI 소스가 포함될 수 있습니다.
+        **숫자 인덱스 vs. 이름 문자열:**
+        *   **숫자 인덱스:** OpenCV는 항상 숫자 인덱스(예: 0, 1, 2, ...)를 사용하여 카메라에 액세스할 수 있습니다. 시스템에서 감지된 첫 번째 카메라는 일반적으로 인덱스 0, 두 번째는 1 등입니다. 특히 여러 USB 카메라 또는 가상 카메라가 있는 경우 순서가 예측 불가능할 수 있습니다.
+        *   **카메라 이름 문자열:** 일부 OpenCV 백엔드(특히 Windows에서 `cv2.CAP_DSHOW`를 사용하거나 적절한 GStreamer/FFmpeg 지원으로 빌드된 경우)는 시스템에 나열된 정확한 이름(예: "Logitech BRIO", "vMix Video")을 사용하여 카메라를 열 수 있습니다.
+        **OpenCV가 NDI 이름을 직접 인식하기 위한 전제 조건:**
+        OpenCV가 네트워크 이름(예: "MYCOMPUTER (OBS)")으로 NDI 소스를 직접 열려면 NDI를 지원하는 백엔드로 OpenCV를 컴파일해야 합니다. 이는 일반적으로 다음을 의미합니다:
+        1.  **NDI SDK 설치됨:** 애플리케이션이 실행되는 시스템에 NDI SDK 및 런타임 라이브러리가 설치되어 있어야 합니다.
+        2.  **NDI 지원 FFmpeg 또는 GStreamer로 빌드된 OpenCV:** OpenCV가 비디오 I/O에 사용하는 FFmpeg 또는 GStreamer 라이브러리 자체가 NDI 지원이 활성화된 상태로 컴파일되어야 합니다. 표준 사전 빌드된 OpenCV 패키지(예: `pip install opencv-python`으로 설치)에는 종종 기본적으로 NDI 지원 FFmpeg/GStreamer 백엔드가 포함되어 있지 *않습니다*. 이러한 종속성이 구성된 상태로 소스에서 OpenCV를 컴파일하거나 NDI 지원을 명시적으로 나타내는 사전 빌드된 패키지를 찾아야 할 수 있습니다.
+        이러한 전제 조건이 충족되지 않으면 OpenCV에서 네트워크 이름으로 NDI 소스를 직접 열려고 하면 실패할 가능성이 높습니다.
+        **권장 방법: NDI 가상 입력 도구**
+        NDI 소스를 이 모드와 같은 일반 OpenCV 애플리케이션에서 사용할 수 있도록 하는 가장 안정적인 방법은 **NDI 가상 입력** 도구([NDI.tv](https://ndi.tv/tools/)에서 사용 가능한 NDI Tools 제품군의 일부)를 사용하는 것입니다.
+        1.  NDI 가상 입력 도구를 실행합니다.
+        2.  시스템 트레이에서 NDI 가상 입력 아이콘을 마우스 오른쪽 버튼으로 클릭합니다.
+        3.  목록에서 원하는 NDI 네트워크 소스를 선택합니다.
+        4.  이제 이 NDI 소스가 시스템에 표준 웹캠(예: "NewTek NDI Video")으로 나타납니다. 정확한 이름은 다를 수 있습니다.
+        NDI 가상 입력을 통해 NDI 소스가 가상 웹캠으로 노출되면 이 애플리케이션의 "NDI/Cam Index/Name (OpenCV)" 필드에서 할당된 이름(OpenCV 백엔드가 이름을 지원하는 경우) 또는 숫자 인덱스를 사용할 수 있습니다.
+        **올바른 인덱스 또는 이름 찾기:**
+        *   **이름:** NDI 가상 입력을 사용하는 경우 이름은 일반적으로 "NewTek NDI Video"와 같습니다. 이 이름을 직접 입력해 볼 수 있습니다. 이 애플리케이션의 `VmixVirtualCameraCaptureThread`는 Windows에서 `pygrabber`를 사용하여 카메라 이름을 나열하므로 vMix 가상 카메라 또는 NDI 가상 입력의 올바른 이름을 식별하는 데 도움이 될 수 있습니다.
+        *   **인덱스:** 이름이 작동하지 않거나 확실하지 않은 경우 올바른 숫자 인덱스를 찾아야 할 수 있습니다. 이는 때때로 시행착오(0, 1, 2...)를 거쳐야 할 수 있습니다. 일부 시스템 또는 타사 도구는 카메라 인덱스를 나열할 수 있습니다. 인덱스로 OpenCV 소스를 열려고 할 때 애플리케이션 로그에 단서나 오류 메시지가 표시될 수도 있습니다.
+        더 풍부한 기능과 직접적인 NDI SDK 통합(오디오 포함)을 갖춘 전용 NDI 캡처의 경우, 이 애플리케이션의 **"NDI 루프백"** 모드가 일반적으로 NDI 소스에 대한 일반 OpenCV 모드보다 권장됩니다.
 -   **동적 NDI 소스 검색:** NDI 루프백 모드에 대해 사용 가능한 NDI 소스를 자동으로 검색하고 목록화합니다.
 -   **vMix 탈리 연동:**
     -   vMix의 프로그램(PGM) 및 프리뷰(PVW) 탈리 상태를 표시합니다.
@@ -265,7 +307,7 @@ vMix의 탈리 정보는 다음을 통해 지원됩니다:
 2.  **프로그램 소스 구성:**
     *   "Program Source" 드롭다운에서 원하는 비디오 소스를 선택합니다:
         *   **NDI Loopback:** "NDI Source" 드롭다운이 검색된 NDI 소스로 채워집니다. 하나를 선택합니다. 이 소스에서 오디오가 캡처됩니다.
-        *   **NDI Virtual Input (OpenCV):** "NDI/Cam Index/Name (OpenCV)" 필드에 NDI 소스 이름 또는 카메라 인덱스를 입력합니다. 이 모드는 SRT 스트리밍 시 비디오 전용입니다.
+        *   **NDI Virtual Input (OpenCV):** "NDI/Cam Index/Name (OpenCV)" 필드에 NDI 소스 이름 또는 카메라 인덱스를 입력합니다. 이 모드는 SRT 스트리밍 시 비디오 전용입니다. (자세한 내용은 특징 섹션의 "NDI 가상 입력 (OpenCV)" 모드에서의 NDI 소스 처리" 참조).
         *   **vMix Virtual Camera:** 애플리케이션이 vMix 가상 카메라를 자동 감지하려고 시도합니다. 이 모드는 SRT 스트리밍 시 비디오 전용입니다.
 3.  **탈리 구성 (선택 사항):**
     *   "Tally Mode"를 선택합니다:
@@ -322,7 +364,7 @@ vMix의 탈리 정보는 다음을 통해 지원됩니다:
 -   **백엔드 WebSocket:** 백엔드 WebSocket URL 연결은 플레이스홀더이며 구현되지 않았습니다.
 -   **Windows 명명된 파이프 오디오:** 비 POSIX 시스템(Windows)에서 FFmpeg 오디오 입력에 대한 대체 방법으로 임시 파일을 사용하며, 이는 실제 파이프처럼 작동하지 않을 수 있고 매우 긴 세션 동안 FFmpeg 또는 디스크 공간 문제를 일으킬 수 있습니다. 적절한 Windows 명명된 파이프 구현(`pywin32` 또는 `ctypes` 사용)이 더 안정적일 것입니다.
 -   **오류 보고:** 스레드에 중요 오류 신호가 추가되었지만, `MainWindow`에서 이러한 신호에 대한 `QMessageBox` 팝업은 개발 중 지속적인 diff 도구 실패로 인해 완전히 구현/적용되지 못했습니다. 사용자는 현재 상태 표시줄 메시지와 로그 보기에 의존하여 오류 세부 정보를 확인해야 합니다.
--   **OpenCV 모드의 NDI 소스 이름:** "NDI Virtual Input (OpenCV)" 모드는 NDI 소스 이름을 처리하기 위해 OpenCV의 `VideoCapture`에 의존합니다. 이를 위해서는 NDI를 지원하는 OpenCV 빌드(종종 NDI로 컴파일된 FFmpeg 백엔드를 통해)가 필요합니다. 사용할 수 없는 경우 카메라 인덱스만 작동합니다.
+-   **OpenCV 모드의 NDI 소스 이름:** "NDI 가상 입력 (OpenCV)" 모드에서 NDI 소스 이름(예: "MYCOMPUTER (OBS)")을 직접 확인하는 기능은 사용자의 OpenCV 빌드 및 백엔드 구성(예: NDI 지원 FFmpeg로 컴파일되었는지 여부)에 크게 의존합니다. `GenericOpenCVCaptureThread` 내에서 숫자 형식 식별자와 문자열 이름을 보다 지능적으로 처리하기 위한 코드 개선이 계획되었으나 개발 중 기술적 어려움으로 인해 구현되지 못했습니다. OpenCV와 함께 NDI 소스를 사용하는 최선의 방법에 대해서는 "특징" 섹션 아래의 "NDI 가상 입력 (OpenCV)" 모드에서의 NDI 소스 처리" 부분을 참조하십시오. NDI 가상 입력 도구를 사용하여 NDI 소스에 대한 표준 웹캠 인터페이스를 만드는 것이 일반적인 OpenCV 설정에서 더 안정적일 수 있습니다. 직접적인 이름 확인이 실패할 경우 카메라의 숫자 인덱스를 사용하는 것이 대안입니다.
 -   **설정 UI:** 일부 구성 가능한 매개변수(예: vMix 호스트/포트, 폴링 간격)에는 전용 UI 입력 필드가 없으므로 `config.json`에서 직접 변경해야 합니다.
 -   **제한된 동적 매개변수 변경:** 활성 SRT 스트림에 대한 오디오 샘플 속도와 같은 일부 매개변수를 스트림 중간에 변경해도 전체 스트림을 다시 시작하지 않으면 FFmpeg이 재구성되지 않을 수 있습니다.
 
@@ -343,3 +385,4 @@ vMix의 탈리 정보는 다음을 통해 지원됩니다:
 ---
 
 이 README는 PD 비디오 스트리밍 애플리케이션에 대한 포괄적인 가이드를 제공합니다.
+[end of README.md]
