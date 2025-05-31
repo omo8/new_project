@@ -170,3 +170,176 @@ You can manually edit this file (when the application is closed) to change setti
 ---
 
 This README provides a comprehensive guide to the PD Video Streaming Application.
+
+## 한글 설명
+
+### 1. 개요
+
+PD 비디오 스트리밍 애플리케이션은 다양한 소스에서 비디오 및 오디오를 캡처하고, vMix의 탈리 정보를 처리하며, SRT를 통해 MediaMTX와 같은 미디어 서버로 출력을 스트리밍하도록 설계된 Python 기반 도구입니다. PyQt5로 구축된 그래픽 사용자 인터페이스(GUI)를 제공하여 소스, 구성 관리 및 스트리밍 프로세스 모니터링을 지원합니다.
+
+이 애플리케이션은 다음을 포함한 여러 프로그램(PGM) 입력 소스를 지원합니다:
+-   **NDI 루프백:** `ndi-python` 라이브러리를 사용하여 네트워크에서 사용 가능한 NDI 오디오 및 비디오 소스를 캡처하여 고품질, 저지연 입력을 제공합니다.
+-   **vMix 가상 카메라:** vMix의 "External" 기능을 통해 비디오 출력을 캡처합니다. 이 기능은 vMix 메인 출력을 가상 웹캠(Windows DirectShow 소스)으로 노출합니다.
+-   **NDI 가상 입력 (일반 OpenCV):** 표준 카메라 장치 또는 기타 OpenCV 호환 소스로 표시되는 NDI 소스를 캡처하기 위한 플레이스홀더입니다. 이는 더 일반적이며 NDI 이름을 사용하려면 특정 OpenCV 구성(예: FFMPEG 백엔드 사용)이 필요할 수 있습니다.
+
+vMix의 탈리 정보는 다음을 통해 지원됩니다:
+-   **HTTP API 폴링:** vMix HTTP API를 폴링하여 PGM/PVW 상태를 가져옵니다. 또한 가독성을 높이기 위해 입력 이름을 캐시하고 표시합니다.
+-   **TCP 탈리 (플레이스홀더):** TCP 기반 탈리 연결을 위한 UI 요소가 있지만, 기본 구현은 플레이스홀더입니다.
+
+애플리케이션은 최종 출력(비디오 및 NDI 루프백의 오디오)을 지정된 SRT URL로 스트리밍하며, 일반적으로 MediaMTX 또는 vMix와 같은 SRT 서버에서 수신합니다.
+
+### 2. 주요 기능
+
+-   **다중 PGM 소스 옵션:**
+    -   `ndi-python`을 통한 NDI 루프백 (비디오 + 오디오).
+    -   OpenCV 및 `pygrabber`를 통한 vMix 가상 카메라 (비디오 전용).
+    -   일반 OpenCV 소스 (비디오 전용, 예: 웹캠, OpenCV가 지원하는 경우 NDI 이름).
+-   **동적 NDI 소스 검색:** NDI 루프백 모드에 대해 사용 가능한 NDI 소스를 자동으로 검색하고 목록화합니다.
+-   **vMix 탈리 연동:**
+    -   vMix의 프로그램(PGM) 및 프리뷰(PVW) 탈리 상태를 표시합니다.
+    -   vMix HTTP API 폴링을 통한 탈리를 지원합니다.
+    -   PGM/PVW에 대한 입력 번호와 함께 vMix 입력 이름을 가져와 표시합니다.
+    -   TCP 기반 탈리 연결을 위한 플레이스홀더.
+-   **SRT 스트리밍:**
+    -   캡처된 비디오 (및 NDI 루프백의 오디오)를 FFmpeg을 사용하여 지정된 SRT URL로 스트리밍합니다.
+    -   FFmpeg 프로세스 라이프사이클을 관리합니다.
+-   **설정 관리:**
+    -   선택한 소스, URL, vMix 연결 세부 정보 등 애플리케이션 설정을 사용자의 애플리케이션 구성 디렉터리에 `config.json` 파일로 저장하고 불러옵니다.
+-   **GUI:**
+    -   PyQt5로 구축된 사용자 친화적인 인터페이스.
+    -   PGM 소스, NDI 소스, 탈리 모드 선택 컨트롤.
+    -   SRT URL, 백엔드 WebSocket URL 입력 필드.
+    -   입력 이름과 함께 PGM/PVW 탈리 정보를 표시합니다.
+    -   애플리케이션 상태, 오류 및 FFmpeg 출력을 위한 로그 표시 영역.
+    -   실시간 피드백을 위한 상태 표시줄.
+-   **FFmpeg 로그 표시:** FFmpeg의 `stderr` 출력을 캡처하여 모니터링 및 문제 해결을 위해 표시합니다.
+-   **크로스 플랫폼 고려 사항:**
+    -   설정 파일 위치에 `QStandardPaths`를 사용합니다.
+    -   카메라 액세스(예: Windows의 `cv2.CAP_DSHOW`) 및 명명된 파이프(FFmpeg 오디오용 POSIX `mkfifo` 대 Windows 임시 파일 대체)에 대한 플랫폼 차이점을 기록합니다.
+
+### 3. 의존성
+
+이 애플리케이션은 여러 Python 라이브러리에 의존합니다. Python 환경에 이러한 라이브러리가 설치되어 있는지 확인하십시오. 일반적으로 `requirements.txt` 파일에 이러한 항목이 나열됩니다:
+
+-   **PyQt5:** 그래픽 사용자 인터페이스용.
+-   **NumPy:** 특히 비디오 프레임 관련 수치 연산용.
+-   **OpenCV (cv2):** vMix 가상 카메라 및 일반 OpenCV 소스에서 비디오 캡처용.
+    -   `opencv-python` 또는 `opencv-contrib-python`.
+-   **ndi-python (`ndi`):** NDI 루프백 캡처용. 시스템에 NDI SDK가 설치되어 있어야 합니다.
+-   **requests:** vMix에 HTTP API 호출(탈리 및 입력 이름 가져오기)용.
+-   **pygrabber:** (Windows 전용) Windows의 DirectShow 장치 중에서 이름으로 vMix 가상 카메라를 검색합니다. 이는 선택 사항이지만 Windows에서 안정적인 vMix 가상 카메라 감지를 위해 강력히 권장됩니다. 없는 경우 애플리케이션은 덜 안정적인 대체 방법을 시도합니다.
+
+**외부 소프트웨어:**
+-   **FFmpeg:** SRT 스트리밍에 필요합니다. 시스템의 PATH에 설치되고 액세스할 수 있어야 합니다.
+-   **NDI SDK:** NDI 기능을 사용하려면 시스템에 NDI 런타임/SDK가 설치되어 있어야 합니다.
+-   **vMix:** (vMix 특정 기능 사용 시 선택 사항) NDI 소스, 가상 카메라 출력 및 탈리 정보 제공용.
+
+### 4. 설치
+
+1.  **Python 설치:** Python 3.x가 설치되어 있는지 확인합니다.
+2.  **NDI SDK 설치:** [NDI.tv](https://ndi.tv/sdk/)에서 NDI SDK(런타임)를 다운로드하여 설치합니다.
+3.  **FFmpeg 설치:** [ffmpeg.org](https://ffmpeg.org/download.html)에서 FFmpeg을 다운로드하고 시스템의 PATH 환경 변수에 추가되었는지 확인합니다.
+4.  **가상 환경 생성 (권장):**
+    ```bash
+    python -m venv venv
+    source venv/bin/activate  # Windows의 경우: venv\Scripts\activate
+    ```
+5.  **Python 의존성 설치:**
+    ```bash
+    pip install PyQt5 numpy opencv-python ndi-python requests pygrabber
+    ```
+    (참고: `pygrabber`는 주로 Windows용입니다. 다른 OS에서는 필요하지 않은 경우 설치를 건너뛸 수 있지만 코드는 이를 포함합니다.)
+6.  **애플리케이션 파일 복제 또는 다운로드:** 모든 애플리케이션 Python 파일(`pd_app.py`, `ndi_loopback_capture_thread.py` 등)을 단일 디렉터리에 배치합니다.
+7.  **vMix 구성 (vMix 기능 사용 시):**
+    *   **NDI 출력:** vMix에서 사용하려는 소스(예: 메인 믹스, 특정 입력)에 대해 NDI 출력을 활성화합니다.
+    *   **가상 카메라:** vMix 설정에서 "External" 출력을 활성화하여 vMix 가상 카메라를 활성화합니다.
+    *   **HTTP API:** vMix 설정 > Web Controller에서 vMix 웹 컨트롤러(HTTP API)가 활성화되어 있는지 확인합니다. 호스트(일반적으로 `127.0.0.1`)와 포트(기본값 `8088`)를 확인합니다.
+    *   **TCP 탈리:** (현재 플레이스홀더인) TCP 탈리 기능을 사용하려는 경우 vMix 설정 > Tally Lights에서 TCP 탈리가 활성화되어 있는지 확인합니다.
+
+### 5. 사용법
+
+1.  **애플리케이션 실행:**
+    ```bash
+    python pd_app.py
+    ```
+2.  **프로그램 소스 구성:**
+    *   "Program Source" 드롭다운에서 원하는 비디오 소스를 선택합니다:
+        *   **NDI Loopback:** "NDI Source" 드롭다운이 검색된 NDI 소스로 채워집니다. 하나를 선택합니다. 이 소스에서 오디오가 캡처됩니다.
+        *   **NDI Virtual Input (OpenCV):** "NDI/Cam Index/Name (OpenCV)" 필드에 NDI 소스 이름 또는 카메라 인덱스를 입력합니다. 이 모드는 SRT 스트리밍 시 비디오 전용입니다.
+        *   **vMix Virtual Camera:** 애플리케이션이 vMix 가상 카메라를 자동 감지하려고 시도합니다. 이 모드는 SRT 스트리밍 시 비디오 전용입니다.
+3.  **탈리 구성 (선택 사항):**
+    *   "Tally Mode"를 선택합니다:
+        *   **HTTP Tally:** vMix API를 폴링합니다. vMix 호스트/포트가 올바른지 확인합니다 (현재 기본값이며, 설정 파일에서 변경 가능).
+        *   **TCP Tally:** 플레이스홀더.
+        *   **None:** 탈리를 비활성화합니다.
+    *   "Connect Tally"를 클릭하여 탈리 데이터 수신을 시작합니다. PGM/PVW 레이블이 입력 이름과 번호로 업데이트됩니다.
+4.  **스트리밍 및 백엔드 구성:**
+    *   **SRT URL:** 대상 SRT URL을 입력합니다 (예: `srt://your_media_server_ip:1234`).
+    *   **Backend WS URL:** 백엔드의 WebSocket URL을 입력합니다 (현재 플레이스홀더 기능).
+5.  **스트리밍 시작:**
+    *   "Start Streaming"을 클릭합니다. 버튼이 "Stop Streaming"으로 변경됩니다.
+    *   비디오 (및 NDI 루프백의 경우 오디오)가 캡처되어 SRT URL로 스트리밍됩니다.
+    *   FFmpeg 로그가 "Logs" 영역에 나타납니다.
+    *   애플리케이션 상태 메시지가 상태 표시줄과 콘솔에 나타납니다.
+6.  **스트리밍 중지:**
+    *   "Stop Streaming"을 클릭합니다.
+
+**설정 파일:**
+애플리케이션 설정은 종료 시 `pd_app_config.json`에 자동으로 저장되고 시작 시 불러옵니다. 일반적인 위치는 다음과 같습니다:
+-   Linux: `~/.config/PDApp/pd_app_config.json`
+-   Windows: `C:\\Users\\<사용자이름>\\AppData\\Local\\PDApp\\PDApp\\pd_app_config.json`
+-   macOS: `~/Library/Application Support/PDApp/pd_app_config.json`
+
+모든 옵션에 대한 UI 요소가 아직 제공되지 않는 경우, 애플리케이션이 닫혀 있을 때 이 파일을 수동으로 편집하여 vMix 호스트/포트 또는 기본 폴링 간격과 같은 설정을 변경할 수 있습니다.
+
+### 6. 문제 해결
+
+-   **FFmpeg를 찾을 수 없음:**
+    -   **오류:** "FFmpeg executable not found."
+    -   **해결책:** FFmpeg이 설치되어 있고 해당 위치가 시스템의 PATH 환경 변수에 추가되었는지 확인합니다.
+-   **NDI 초기화 실패 / NDI 소스를 찾을 수 없음:**
+    -   **오류:** "ndi.initialize() failed" 또는 "Could not find specified NDI source..."
+    -   **해결책:**
+        -   시스템에 NDI SDK 런타임이 올바르게 설치되었는지 확인합니다.
+        -   NDI 소스(예: vMix NDI 출력)가 활성 상태이고 동일한 네트워크에 있는지 확인합니다.
+        -   방화벽 설정을 확인하여 NDI 트래픽이 허용되는지 확인합니다.
+-   **카메라를 열 수 없음 (vMix 가상 카메라 / OpenCV):**
+    -   **오류:** "Failed to open vMix Virtual Camera..." 또는 "Failed to open OpenCV source..."
+    -   **해결책:**
+        -   vMix 가상 카메라의 경우: vMix에서 "External" 출력이 활성화되어 있는지 확인합니다. Windows에 `pygrabber`가 설치되어 있지 않으면 감지가 실패할 수 있습니다. `pygrabber`를 설치하십시오. 다른 애플리케이션이 카메라를 독점적으로 사용하고 있지 않은지 확인합니다.
+        -   OpenCV의 경우: 카메라 인덱스 또는 소스 문자열이 올바른지 확인합니다. 카메라 드라이버가 설치되어 있고 다른 애플리케이션에서 카메라를 사용하고 있지 않은지 확인합니다.
+-   **HTTP 탈리 문제:**
+    -   **오류:** vMix API에 대한 "Connection error" 또는 "Request timed out".
+    -   **해결책:** vMix가 실행 중이고 해당 웹 컨트롤러(HTTP API)가 올바른 호스트 및 포트(기본값 `http://127.0.0.1:8088`)에서 활성화되어 있는지 확인합니다. 방화벽을 확인합니다.
+-   **SRT 출력의 비디오/오디오 동기화 문제:**
+    -   이는 복잡할 수 있습니다. 충분한 처리 능력을 확보하십시오. FFmpeg 매개변수(지연 시간, 버퍼 크기 - 현재 UI에 노출되지 않음)를 실험해 보십시오. 네트워크 지터도 SRT에 영향을 줄 수 있습니다.
+-   **애플리케이션 멈춤:**
+    -   이런 현상이 발생하면 콘솔 로그에서 처리되지 않은 예외가 있는지 확인하십시오. 네트워크 작업 또는 NDI 검색의 긴 시간 초과는 스레딩으로 이를 방지하려고 하지만 일시적으로 UI 응답성을 저하시킬 수 있습니다.
+
+### 7. 알려진 문제점 및 제한 사항
+
+-   **TCP 탈리:** TCP 탈리 기능은 플레이스홀더이며 구현되지 않았습니다.
+-   **백엔드 WebSocket:** 백엔드 WebSocket URL 연결은 플레이스홀더이며 구현되지 않았습니다.
+-   **Windows 명명된 파이프 오디오:** 비 POSIX 시스템(Windows)에서 FFmpeg 오디오 입력에 대한 대체 방법으로 임시 파일을 사용하며, 이는 실제 파이프처럼 작동하지 않을 수 있고 매우 긴 세션 동안 FFmpeg 또는 디스크 공간 문제를 일으킬 수 있습니다. 적절한 Windows 명명된 파이프 구현(`pywin32` 또는 `ctypes` 사용)이 더 안정적일 것입니다.
+-   **오류 보고:** 스레드에 중요 오류 신호가 추가되었지만, `MainWindow`에서 이러한 신호에 대한 `QMessageBox` 팝업은 개발 중 지속적인 diff 도구 실패로 인해 완전히 구현/적용되지 못했습니다. 사용자는 현재 상태 표시줄 메시지와 로그 보기에 의존하여 오류 세부 정보를 확인해야 합니다.
+-   **OpenCV 모드의 NDI 소스 이름:** "NDI Virtual Input (OpenCV)" 모드는 NDI 소스 이름을 처리하기 위해 OpenCV의 `VideoCapture`에 의존합니다. 이를 위해서는 NDI를 지원하는 OpenCV 빌드(종종 NDI로 컴파일된 FFmpeg 백엔드를 통해)가 필요합니다. 사용할 수 없는 경우 카메라 인덱스만 작동합니다.
+-   **설정 UI:** 일부 구성 가능한 매개변수(예: vMix 호스트/포트, 폴링 간격)에는 전용 UI 입력 필드가 없으므로 `config.json`에서 직접 변경해야 합니다.
+-   **제한된 동적 매개변수 변경:** 활성 SRT 스트림에 대한 오디오 샘플 속도와 같은 일부 매개변수를 스트림 중간에 변경해도 전체 스트림을 다시 시작하지 않으면 FFmpeg이 재구성되지 않을 수 있습니다.
+
+### 8. 향후 개선 사항
+
+-   **TCP 탈리 전체 구현.**
+-   **백엔드 WebSocket 연동:** 백엔드 서버와의 실제 데이터 교환을 구현합니다.
+-   **안정적인 Windows 명명된 파이프:** Windows에서 FFmpeg으로 더 안정적인 오디오 파이핑을 위해 `pywin32` 또는 `ctypes`를 사용합니다.
+-   **향상된 오류 처리:** `pd_app.py` 수정 문제를 해결하여 모든 중요 오류에 대해 `QMessageBox` 팝업을 완전히 구현합니다. 보다 구체적인 예외 처리를 구현합니다.
+-   **고급 FFmpeg 제어:** UI에 더 많은 FFmpeg 매개변수(예: 비트 전송률, GOP 크기, 인코딩 프로필)를 노출합니다.
+-   **모든 구성 가능 설정에 대한 UI:** 현재 `config.json`에서만 편집 가능한 모든 매개변수에 대한 입력 필드를 추가합니다.
+-   **스트림 미리보기:** 플레이스홀더 QLabel 대신 GUI 내에 실제 비디오 미리보기를 구현합니다.
+-   **OSC 연동:** 원격 제어 또는 데이터 출력을 위한 OSC 지원을 추가합니다.
+-   **크로스 플랫폼 테스트 및 패키징:** Windows, macOS 및 Linux에서 철저히 테스트합니다. 배포 가능한 패키지를 만듭니다.
+-   **코드 개선:** 복잡한 메서드를 계속 리팩토링하고 전체 코드 구조를 개선합니다(예: 복잡성이 증가할 경우 모드 관리를 위한 상태 패턴 사용).
+-   **상세 로깅 수준:** 선택 가능한 로깅 수준(디버그, 정보, 경고, 오류)을 구현합니다.
+
+---
+
+이 README는 PD 비디오 스트리밍 애플리케이션에 대한 포괄적인 가이드를 제공합니다.
