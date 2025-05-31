@@ -7,7 +7,8 @@ class NDILoopbackCaptureThread(QThread):
     new_video_frame_signal = pyqtSignal(object)  # Emits NumPy array (BGR format)
     new_audio_frame_signal = pyqtSignal(object, int, int, int)  # Emits audio data, sample rate, num channels, timestamp
     status_signal = pyqtSignal(str)
-    error_signal = pyqtSignal(str)
+    error_signal = pyqtSignal(str) # For general errors to status bar or log
+    critical_error_signal = pyqtSignal(str, str) # title, message for QMessageBox
     ndi_sources_signal = pyqtSignal(list)  # Emits list of NDI source names
     ndi_info_signal = pyqtSignal(str)  # Emits resolution and FPS info
 
@@ -46,199 +47,149 @@ class NDILoopbackCaptureThread(QThread):
         self.running = True
         self.status_signal.emit("NDI Loopback thread started.")
 
-        if not ndi.initialize():
-            self.error_signal.emit("Failed to initialize NDI.")
-            self.running = False
-            return
+        ndi_initialized_here = False
+        try:
+            # NDIlib_initialize is reference counted, so it's safe to call multiple times.
+            # A corresponding NDIlib_destroy must be called for each NDIlib_initialize.
+            if not ndi.initialize():
+                err_msg = "ndi.initialize() failed. NDI may not be available or NDI runtime is not installed."
+                self.error_signal.emit(err_msg)
+                self.critical_error_signal.emit("NDI Initialization Error", err_msg)
+                return
 
-        self.pNDI_find = ndi.find_create_v2()
-        if self.pNDI_find is None:
-            self.error_signal.emit("Failed to create NDI find instance.")
-            ndi.destroy()
-            self.running = False
-            return
+            self.pNDI_find = ndi.find_create_v2()
+            if self.pNDI_find is None:
+                err_msg = "Failed to create NDI find instance. NDI may not be functioning correctly."
+                self.error_signal.emit(err_msg)
+                self.critical_error_signal.emit("NDI Error", err_msg)
+                return
 
-        # If ndi_source_name is None, this thread is purely for discovery.
-        if self.ndi_source_name is None:
-            self.status_signal.emit("NDI Discovery Service Started.")
-            while self.running:
-                if ndi.find_wait_for_sources(self.pNDI_find, 2000): # Wait for 2 seconds
-                    current_sources = ndi.find_get_current_sources(self.pNDI_find)
-                    source_names = [source.ndi_name for source in current_sources]
-                    self.ndi_sources_signal.emit(source_names)
-                    # self.status_signal.emit(f"Discovered NDI sources: {source_names}") # Can be noisy
-                else:
-                    # self.status_signal.emit("No new NDI sources found in the last interval.")
-                    # Emit empty list if no sources are found after waiting, to clear ComboBox if necessary
-                    # Or emit previously known sources if that's preferred. Emitting current state is good.
-                    current_sources = ndi.find_get_current_sources(self.pNDI_find) # Get current list even on timeout
-                    source_names = [source.ndi_name for source in current_sources]
-                    self.ndi_sources_signal.emit(source_names)
+            # If ndi_source_name is None, this thread is purely for discovery.
+            if self.ndi_source_name is None:
+                self.status_signal.emit("NDI Discovery Service Started.")
+                while self.running:
+                    if ndi.find_wait_for_sources(self.pNDI_find, 2000):
+                        current_sources = ndi.find_get_current_sources(self.pNDI_find)
+                        source_names = [source.ndi_name for source in current_sources]
+                        self.ndi_sources_signal.emit(source_names)
+                    else:
+                        current_sources = ndi.find_get_current_sources(self.pNDI_find)
+                        source_names = [source.ndi_name for source in current_sources]
+                        self.ndi_sources_signal.emit(source_names)
 
-                # Loop for continuous discovery, check running flag periodically
-                for _ in range(5): # Check running flag every ~200ms for responsiveness
-                    if not self.running:
+                    for _ in range(5):
+                        if not self.running: break
+                        QThread.msleep(200)
+                self.status_signal.emit("NDI Discovery Service Stopped.")
+                return # Exits run method for discovery-only threads
+
+            # Proceed with connection and capture if ndi_source_name is provided.
+            self.status_signal.emit(f"Attempting to connect to specified NDI source: {self.ndi_source_name}")
+            found_specific_source = False
+            for attempt in range(5):
+                if not ndi.find_wait_for_sources(self.pNDI_find, 1000):
+                    self.status_signal.emit(f"Attempt {attempt+1}: Specified source '{self.ndi_source_name}' not found yet. Retrying...")
+                    continue
+                current_sources = ndi.find_get_current_sources(self.pNDI_find)
+                source_names = [source.ndi_name for source in current_sources]
+                self.ndi_sources_signal.emit(source_names)
+                for source_obj in current_sources:
+                    if source_obj.ndi_name == self.ndi_source_name:
+                        self.ndi_source_to_connect = source_obj
+                        self.status_signal.emit(f"Found specified NDI source: {self.ndi_source_name}")
+                        found_specific_source = True
                         break
-                    QThread.msleep(200)
-            self.status_signal.emit("NDI Discovery Service Stopped.")
-            self._cleanup_ndi()
-            return # Exit run method for discovery-only threads
+                if found_specific_source: break
+                else: QThread.msleep(200)
 
-        # Proceed with connection and capture if ndi_source_name is provided.
-        self.status_signal.emit(f"Attempting to connect to specified NDI source: {self.ndi_source_name}")
+            if not found_specific_source:
+                err_msg = f"Could not find specified NDI source '{self.ndi_source_name}' after several attempts."
+                self.error_signal.emit(err_msg)
+                # Not necessarily critical enough for a QMessageBox unless it halts user workflow.
+                # For now, status bar error is fine. If it's a blocking issue, then critical.
+                return
+            if not self.ndi_source_to_connect: # Should not happen if found_specific_source is true
+                 err_msg = f"Internal error: NDI source object for '{self.ndi_source_name}' not set despite being 'found'."
+                 self.error_signal.emit(err_msg)
+                 self.critical_error_signal.emit("NDI Internal Error", err_msg)
+                 return
 
-        sources = []
-        found_specific_source = False
-        # Try to find the specific source for a few seconds
-        for attempt in range(5): # Max ~5 seconds to find the specific source
-            if not ndi.find_wait_for_sources(self.pNDI_find, 1000):
-                self.status_signal.emit(f"Attempt {attempt+1}: Specified source '{self.ndi_source_name}' not found yet. Retrying...")
-                continue
+            self.status_signal.emit(f"Connecting to NDI receiver for: {self.ndi_source_to_connect.ndi_name}...")
+            recv_create_attrs = ndi.RecvCreateV3()
+            recv_create_attrs.color_format = ndi.RECV_COLOR_FORMAT_BGRX_BGRA
+            recv_create_attrs.bandwidth = ndi.RECV_BANDWIDTH_HIGHEST
+            recv_create_attrs.allow_video_fields = False
+            self.pNDI_recv = ndi.recv_create_v3(recv_create_attrs)
 
-            current_sources = ndi.find_get_current_sources(self.pNDI_find)
-            source_names = [source.ndi_name for source in current_sources]
-            # Also emit all sources found during targeted search, useful for GUI update
-            self.ndi_sources_signal.emit(source_names)
+            if self.pNDI_recv is None:
+                err_msg = "Failed to create NDI receiver. Resources might be unavailable or NDI is not functioning."
+                self.error_signal.emit(err_msg)
+                self.critical_error_signal.emit("NDI Receiver Error", err_msg)
+                return
 
-            for source_obj in current_sources:
-                if source_obj.ndi_name == self.ndi_source_name:
-                    self.ndi_source_to_connect = source_obj
-                    self.status_signal.emit(f"Found specified NDI source: {self.ndi_source_name}")
-                    found_specific_source = True
-                    break
-            if found_specific_source:
-                break
-            else:
-                QThread.msleep(200) # Wait a bit before retrying find_get_current_sources
+            ndi.recv_connect(self.pNDI_recv, self.ndi_source_to_connect)
+            self.status_signal.emit(f"Connected to {self.ndi_source_to_connect.ndi_name}.")
 
-        if not found_specific_source:
-            self.error_signal.emit(f"Could not find specified NDI source '{self.ndi_source_name}' after several attempts.")
-            self._cleanup_ndi()
-            return
+            last_video_timestamp = 0
+            prev_width, prev_height, prev_fps = 0,0,0
 
-        # At this point, self.ndi_source_to_connect should be set.
-        if not self.ndi_source_to_connect:
-             self.error_signal.emit(f"Internal error: NDI source object for '{self.ndi_source_name}' not set before connection attempt.")
-             self._cleanup_ndi()
-             return
-
-        self.status_signal.emit(f"Connecting to NDI receiver for: {self.ndi_source_to_connect.ndi_name}...")
-        recv_create_attrs = ndi.RecvCreateV3()
-        recv_create_attrs.color_format = ndi.RECV_COLOR_FORMAT_BGRX_BGRA
-        # Alternatives:
-        # recv_create_attrs.color_format = ndi.RECV_COLOR_FORMAT_UYVY_BGRA # Requires conversion
-        recv_create_attrs.bandwidth = ndi.RECV_BANDWIDTH_HIGHEST
-        recv_create_attrs.allow_video_fields = False
-
-        self.pNDI_recv = ndi.recv_create_v3(recv_create_attrs)
-        if self.pNDI_recv is None:
-            self.error_signal.emit("Failed to create NDI receiver.")
-            self._cleanup_ndi()
-            return
-
-        ndi.recv_connect(self.pNDI_recv, self.ndi_source_to_connect)
-        self.status_signal.emit(f"Connected to {self.ndi_source_to_connect.ndi_name}.")
-
-        # Metadata for FPS calculation
-        last_video_timestamp = 0
-        frame_count = 0
-        fps_calc_interval = 1 # seconds
-        fps_timer = QTimer() # Using QTimer for periodic FPS calculation might be complex in a thread
-                            # Simpler approach: calculate based on frame timestamps or count over time.
-
-
-        prev_width, prev_height, prev_fps = 0,0,0
-
-        while self.running:
-            video_frame, audio_frame, metadata_frame = None, None, None
-            try:
-                frame_type, data, timestamp = ndi.recv_capture_v3(self.pNDI_recv, timeout_ms=1000)
-
-                if frame_type == ndi.FRAME_TYPE_VIDEO:
-                    video_frame = data # data is already an NDIlib.video_frame_v2_t
-                    # self.status_signal.emit("Video frame received")
-                    if video_frame.data is None or video_frame.data.size == 0:
-                        self.error_signal.emit("Received empty video frame data.")
+            while self.running:
+                try:
+                    frame_type, data, timestamp = ndi.recv_capture_v3(self.pNDI_recv, timeout_ms=1000)
+                    if frame_type == ndi.FRAME_TYPE_VIDEO:
+                        video_frame = data
+                        if video_frame.data is None or video_frame.data.size == 0:
+                            self.error_signal.emit("Received empty video frame data.")
+                            ndi.recv_free_video_v2(self.pNDI_recv, video_frame)
+                            continue
+                        self.frame_width = video_frame.xres
+                        self.frame_height = video_frame.yres
+                        if last_video_timestamp > 0 and video_frame.timestamp > last_video_timestamp:
+                            time_diff_ns = video_frame.timestamp - last_video_timestamp
+                            time_diff_s = time_diff_ns / 10_000_000.0
+                            if time_diff_s > 0: self.fps = 1.0 / time_diff_s
+                        last_video_timestamp = video_frame.timestamp
+                        if self.frame_width!=prev_width or self.frame_height!=prev_height or abs(self.fps-prev_fps)>1:
+                            self.ndi_info_signal.emit(f"Res: {self.frame_width}x{self.frame_height}, FPS: {self.fps:.2f}")
+                            prev_width,prev_height,prev_fps = self.frame_width,self.frame_height,self.fps
+                        self.new_video_frame_signal.emit(np.copy(video_frame.data[:, :, :3]))
                         ndi.recv_free_video_v2(self.pNDI_recv, video_frame)
-                        continue
+                    elif frame_type == ndi.FRAME_TYPE_AUDIO:
+                        audio_frame = data
+                        self.new_audio_frame_signal.emit(np.copy(audio_frame.data), audio_frame.sample_rate, audio_frame.no_channels, audio_frame.timestamp)
+                        ndi.recv_free_audio_v2(self.pNDI_recv, audio_frame)
+                    elif frame_type == ndi.FRAME_TYPE_METADATA:
+                        ndi.recv_free_metadata(self.pNDI_recv, data)
+                    elif frame_type == ndi.FRAME_TYPE_ERROR:
+                        self.error_signal.emit(f"NDI Frame Error: {data.decode('utf-8', errors='replace') if hasattr(data, 'decode') else 'Unknown NDI frame error'}")
+                        QThread.msleep(100)
+                    elif frame_type == ndi.FRAME_TYPE_NONE: # Timeout
+                        pass
+                except Exception as e: # Catch errors within the capture loop
+                    self.error_signal.emit(f"Error during NDI capture loop: {str(e)}")
+                    QThread.msleep(1000) # Avoid busy-looping on continuous errors
 
-                    # Frame properties
-                    self.frame_width = video_frame.xres
-                    self.frame_height = video_frame.yres
-                    # self.fps = video_frame.frame_rate_N / video_frame.frame_rate_D # This can be fractional
+            self.status_signal.emit("NDI Loopback capture/discovery loop finished.")
 
-                    # Calculate FPS more dynamically
-                    current_time = QTimer() # This is not how QTimer works.
-                                        # For FPS, usually count frames over an interval or use timestamps.
-                    # Using frame timestamps for FPS (approximate)
-                    if last_video_timestamp > 0 and video_frame.timestamp > last_video_timestamp:
-                        time_diff_ns = video_frame.timestamp - last_video_timestamp # Timestamp is in 100ns units
-                        time_diff_s = time_diff_ns / 10_000_000.0 # Convert to seconds
-                        if time_diff_s > 0:
-                            self.fps = 1.0 / time_diff_s
-                    last_video_timestamp = video_frame.timestamp
+        except Exception as e: # Catch errors during setup (before main loop)
+            self.error_signal.emit(f"Unhandled exception in NDI thread run method: {str(e)}")
+        finally:
+            self.running = False # Ensure running is false if an exception caused premature exit
+            self.status_signal.emit("NDI Loopback thread final cleanup.")
+            self._cleanup_ndi()
 
-
-                    if self.frame_width != prev_width or self.frame_height != prev_height or abs(self.fps - prev_fps) > 1:
-                        info_str = f"Res: {self.frame_width}x{self.frame_height}, FPS: {self.fps:.2f}"
-                        self.ndi_info_signal.emit(info_str)
-                        prev_width, prev_height, prev_fps = self.frame_width, self.frame_height, self.fps
-
-
-                    # Process video data
-                    # Assuming RECV_COLOR_FORMAT_BGRX_BGRA, data is BGRA. We need BGR.
-                    # Make a copy because the buffer is owned by NDI.
-                    frame_data_bgr = np.copy(video_frame.data[:, :, :3])
-                    self.new_video_frame_signal.emit(frame_data_bgr)
-                    ndi.recv_free_video_v2(self.pNDI_recv, video_frame)
-
-                elif frame_type == ndi.FRAME_TYPE_AUDIO:
-                    audio_frame = data # data is an NDIlib.audio_frame_v2_t
-                    # self.status_signal.emit("Audio frame received")
-                    # Audio data is interleaved. NDI hands it as float32, planar typically.
-                    # Let's confirm format with `ndi-python` docs or examples.
-                    # The `audio_frame.data` is a NumPy array.
-                    # timestamp is in 100s of nanoseconds
-                    self.new_audio_frame_signal.emit(np.copy(audio_frame.data),
-                                                     audio_frame.sample_rate,
-                                                     audio_frame.no_channels,
-                                                     audio_frame.timestamp)
-                    ndi.recv_free_audio_v2(self.pNDI_recv, audio_frame)
-
-                elif frame_type == ndi.FRAME_TYPE_METADATA:
-                    # self.status_signal.emit("Metadata frame received")
-                    ndi.recv_free_metadata(self.pNDI_recv, data) # data is NDIlib.metadata_frame_t
-
-                elif frame_type == ndi.FRAME_TYPE_ERROR:
-                    self.error_signal.emit("Error received from NDI stream. Restarting connection might be needed.")
-                    # Potentially try to reconnect or signal critical error
-                    QThread.msleep(100) # Wait a bit before trying to capture again
-
-                elif frame_type == ndi.FRAME_TYPE_NONE:
-                    # self.status_signal.emit("No new NDI frame received in timeout.")
-                    pass # Timeout, normal
-
-                else:
-                    # self.status_signal.emit(f"Unhandled NDI frame type: {frame_type}")
-                    pass
-
-
-            except Exception as e:
-                self.error_signal.emit(f"Error during NDI capture: {str(e)}")
-                # Depending on the error, may need to break or attempt re-initialization
-                QThread.msleep(1000) # Wait a bit before trying again
-
-        self.status_signal.emit("NDI Loopback thread stopping.")
-        self._cleanup_ndi()
 
     def _cleanup_ndi(self):
-        self.status_signal.emit("Cleaning up NDI resources.")
+        self.status_signal.emit("Cleaning up NDI resources...")
         if self.pNDI_recv:
             ndi.recv_destroy(self.pNDI_recv)
             self.pNDI_recv = None
-        if self.pNDI_find:
+        if self.pNDI_find: # pNDI_find is always created if initialize succeeds
             ndi.find_destroy(self.pNDI_find)
             self.pNDI_find = None
+
+        # Matching the NDI SDK's requirement: "For every call to NDIlib_initialize
+        # there must be a corresponding call to NDIlib_destroy."
         ndi.destroy()
         self.status_signal.emit("NDI resources cleaned up.")
 

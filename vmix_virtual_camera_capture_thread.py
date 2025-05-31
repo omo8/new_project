@@ -13,7 +13,8 @@ except ImportError:
 class VmixVirtualCameraCaptureThread(QThread):
     new_video_frame_signal = pyqtSignal(object)  # Emits NumPy array (BGR format)
     status_signal = pyqtSignal(str)
-    error_signal = pyqtSignal(str)
+    error_signal = pyqtSignal(str) # For general errors
+    critical_error_signal = pyqtSignal(str, str) # title, message for QMessageBox
     video_info_signal = pyqtSignal(str)  # Emits "Res: WxH, FPS: F"
 
     def __init__(self, parent=None):
@@ -25,31 +26,10 @@ class VmixVirtualCameraCaptureThread(QThread):
     def _find_vmix_camera_index(self):
         self.status_signal.emit("Searching for vMix Virtual Camera...")
         if not PYGRABBER_AVAILABLE:
-            self.error_signal.emit("pygrabber library is not available. Cannot search for vMix Virtual Camera by name.")
-            # Fallback: Try common camera indices like 0, 1, 2 if pygrabber is not there.
-            # This is a very rough fallback and might not find vMix.
-            # For robust operation, pygrabber should be installed.
-            # Here, we could try a few indices and check their names if OpenCV provides them (often not)
-            # Or simply return a common index and hope for the best, or None.
-            self.status_signal.emit("Attempting fallback to common camera indices (0 or 1) due to missing pygrabber.")
-            # Let's try to open index 0 and 1 and see if they work, but we can't verify the name.
-            # This part is highly unreliable without pygrabber.
-            # For now, let's assume if pygrabber is not there, we can't reliably find it.
-            # A more robust fallback would be to allow user to specify index or iterate common indices.
-            # Returning None is safer if we can't find it by name.
-            self.error_signal.emit("Consider installing pygrabber for reliable vMix camera detection.")
-            # As a simple simulation of pygrabber not finding it:
-            # return None
-            # Or, to allow testing of the rest of the pipeline, assume index 0 or 1 if vMix is likely the only DSHOW cam
-            # For this exercise, let's try to return a common index to allow flow, but with error.
-            # This is a placeholder for when pygrabber is not installed.
-            # It should ideally be handled by the user or a configuration setting.
-            # Let's return 0 for testing purposes if pygrabber is not found.
-            # self.error_signal.emit("Simulating vMix camera at index 0 (pygrabber unavailable).")
-            # return 0
-            # A better simulation for "not found if pygrabber is missing":
+            err_msg = "pygrabber library is not installed. Cannot search for vMix Virtual Camera by name. Please install pygrabber."
+            self.error_signal.emit(err_msg)
+            self.critical_error_signal.emit("Dependency Missing", err_msg)
             return None
-
 
         try:
             graph = FilterGraph()
@@ -61,65 +41,68 @@ class VmixVirtualCameraCaptureThread(QThread):
                     self.status_signal.emit(f"Found '{self.camera_name_to_find}' at index {i} (name: {device_name})")
                     return i
 
-            self.error_signal.emit(f"'{self.camera_name_to_find}' not found in available DirectShow devices.")
+            self.error_signal.emit(f"'{self.camera_name_to_find}' not found in available DirectShow devices. Ensure vMix External Output is active.")
+            # This might not be critical enough for a QMessageBox every time, depends on UX.
+            # For now, an error_signal is sufficient. If it's critical, a critical_error_signal can be added.
             return None
         except Exception as e:
-            self.error_signal.emit(f"Error using pygrabber to find cameras: {e}")
+            err_msg = f"Error using pygrabber to find cameras: {e}"
+            self.error_signal.emit(err_msg)
+            self.critical_error_signal.emit("Camera Discovery Error", err_msg)
             return None
 
     def run(self):
         self.running = True
         self.status_signal.emit("vMix Virtual Camera thread started.")
 
-        camera_index = self._find_vmix_camera_index()
+        try:
+            camera_index = self._find_vmix_camera_index()
 
-        if camera_index is None:
-            self.error_signal.emit("vMix Virtual Camera index not found. Stopping thread.")
-            self.running = False
-            return
+            if camera_index is None:
+                # Error messages are already emitted by _find_vmix_camera_index.
+                # If it returned None, it means either pygrabber is missing (critical signal sent)
+                # or camera not found (error signal sent).
+                return
 
-        self.status_signal.emit(f"Attempting to open vMix Virtual Camera at index {camera_index} using CAP_DSHOW.")
-        self.cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+            self.status_signal.emit(f"Attempting to open vMix Virtual Camera at index {camera_index} using CAP_DSHOW.")
+            self.cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
 
-        if not self.cap.isOpened():
-            self.error_signal.emit(f"Failed to open vMix Virtual Camera at index {camera_index}.")
-            self.running = False
-            return
+            if not self.cap or not self.cap.isOpened():
+                err_msg = f"Failed to open vMix Virtual Camera at index {camera_index}. It might be in use or drivers are missing."
+                self.error_signal.emit(err_msg)
+                self.critical_error_signal.emit("Camera Error", err_msg)
+                return
 
-        # Try to set a common resolution, vMix virtual cam might have a fixed one
-        # self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        # self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-        # self.cap.set(cv2.CAP_PROP_FPS, 30)
+            frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = self.cap.get(cv2.CAP_PROP_FPS)
+            if fps == 0:
+                fps = 30
+                self.status_signal.emit("Camera FPS reported as 0, assuming 30 FPS.")
 
+            self.status_signal.emit(f"vMix Virtual Camera opened: {frame_width}x{frame_height} @ {fps:.2f} FPS (reported)")
+            self.video_info_signal.emit(f"Res: {frame_width}x{frame_height}, FPS: {fps:.2f}")
 
-        frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = self.cap.get(cv2.CAP_PROP_FPS)
-        if fps == 0: # FPS might not be reported correctly by all DSHOW cameras
-            fps = 30 # Assume 30 FPS if not reported or if 0
-            self.status_signal.emit("Camera FPS reported as 0, assuming 30 FPS.")
+            while self.running:
+                ret, frame = self.cap.read()
+                if ret:
+                    self.new_video_frame_signal.emit(frame)
+                else:
+                    self.error_signal.emit("Failed to read frame from vMix Virtual Camera. End of stream or error.")
+                    break # Exit loop on read error
 
-        self.status_signal.emit(f"vMix Virtual Camera opened: {frame_width}x{frame_height} @ {fps:.2f} FPS (reported)")
-        self.video_info_signal.emit(f"Res: {frame_width}x{frame_height}, FPS: {fps:.2f}")
+                # Minimal sleep to allow thread to be responsive to stop() if camera provides frames very fast.
+                # Actual frame rate is dictated by the camera.
+                QThread.msleep(1)
 
-        while self.running:
-            ret, frame = self.cap.read()
-            if ret:
-                self.new_video_frame_signal.emit(frame)
-            else:
-                self.error_signal.emit("Failed to read frame from vMix Virtual Camera. End of stream or error.")
-                self.running = False # Stop if we can't read frames
-                break
-
-            # Control frame rate if necessary, though VideoCapture should handle it.
-            # For DSHOW, it typically respects the camera's output rate.
-            # self.msleep(int(1000 / fps) if fps > 0 else 33)
-
-        if self.cap:
-            self.cap.release()
-            self.status_signal.emit("vMix Virtual Camera released.")
-
-        self.status_signal.emit("vMix Virtual Camera thread stopped.")
+        except Exception as e:
+            self.error_signal.emit(f"Unhandled exception in vMix Virtual Camera thread: {e}")
+        finally:
+            self.running = False # Ensure loop condition is false on exit
+            if self.cap:
+                self.cap.release()
+                self.status_signal.emit("vMix Virtual Camera released.")
+            self.status_signal.emit("vMix Virtual Camera thread stopped.")
 
     def stop(self):
         self.status_signal.emit("Attempting to stop vMix Virtual Camera thread...")
