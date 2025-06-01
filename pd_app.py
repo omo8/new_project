@@ -1,6 +1,6 @@
 import sys
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget,
-                             QComboBox, QLabel, QHBoxLayout, QStatusBar, QGroupBox, QFormLayout, QTextEdit)
+                             QComboBox, QLabel, QHBoxLayout, QStatusBar, QGroupBox, QFormLayout, QTextEdit, QLineEdit)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 import numpy as np
 import cv2 # For NDICaptureThread (OpenCV based)
@@ -805,6 +805,12 @@ class MainWindow(QMainWindow):
 
             if not self.srt_streamer_thread.isRunning():
                  self.srt_streamer_thread.start()
+        else: # Stop streaming
+            self.toggle_stream_button.setText("Start Streaming")
+            self._stop_all_capture_threads()
+            if self.srt_streamer_thread.isRunning():
+                self.srt_streamer_thread.stop()
+            self.update_status_bar("Streaming stopped.")
         else: # Stop streaming
             self.toggle_stream_button.setText("Start Streaming")
             self._stop_all_capture_threads()
