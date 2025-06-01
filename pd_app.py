@@ -1,6 +1,6 @@
 import sys
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget,
-                             QComboBox, QLabel, QHBoxLayout, QStatusBar, QGroupBox, QFormLayout)
+                             QComboBox, QLabel, QHBoxLayout, QStatusBar, QGroupBox, QFormLayout, QTextEdit)
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 import numpy as np
 import cv2 # For NDICaptureThread (OpenCV based)
@@ -133,32 +133,35 @@ class SRTStreamerThread(QThread):
         if not self.frame_width or not self.frame_height or not self.fps:
             self.error_signal.emit("FFmpeg: Video parameters not set.")
             return False
-        if not self.audio_sample_rate or not self.audio_channels:
-            self.error_signal.emit("FFmpeg: Audio parameters not set.")
-            return False
 
-        # Create a named pipe for audio
-        # On Unix, use mkfifo. On Windows, this needs a different approach (e.g. pywin32 or a temp file as pipe).
-        # For simplicity here, we'll try mkfifo and note it's Unix-specific.
-        try:
-            if os.name == 'posix':
-                self.audio_pipe_path = os.path.join(tempfile.gettempdir(), f"ffmpeg_audio_pipe_{os.getpid()}")
-                if os.path.exists(self.audio_pipe_path):
-                    os.unlink(self.audio_pipe_path) # Ensure it's fresh
-                os.mkfifo(self.audio_pipe_path)
-                self.status_signal.emit(f"Created named pipe for audio: {self.audio_pipe_path}")
-            else:
-                # Fallback for non-POSIX systems: use a temporary file path.
-                # This might not work as a true pipe for FFmpeg on Windows unless FFmpeg
-                # specifically supports reading a growing file like a pipe.
-                # A more robust Windows solution involves CreateNamedPipe.
-                fd, self.audio_pipe_path = tempfile.mkstemp(suffix=".rawaudio")
-                os.close(fd) # Close the descriptor, we just need the path
-                self.status_signal.emit(f"Using temp file as audio pipe (Windows fallback): {self.audio_pipe_path}")
-
-        except Exception as e:
-            self.error_signal.emit(f"Failed to create audio pipe: {e}")
-            return False
+        # Audio pipe creation only if audio is enabled
+        self.audio_pipe_path = None # Ensure it's None if audio is disabled
+        if self.audio_channels > 0 and self.audio_sample_rate > 0:
+            try:
+                if os.name == 'posix':
+                    self.audio_pipe_path = os.path.join(tempfile.gettempdir(), f"ffmpeg_audio_pipe_{os.getpid()}")
+                    if os.path.exists(self.audio_pipe_path):
+                        os.unlink(self.audio_pipe_path)
+                    os.mkfifo(self.audio_pipe_path)
+                    self.status_signal.emit(f"Created named pipe for audio: {self.audio_pipe_path}")
+                else: # Fallback for non-POSIX (Windows)
+                    fd, self.audio_pipe_path = tempfile.mkstemp(suffix=".rawaudio")
+                    os.close(fd)
+                    self.status_signal.emit(f"Using temp file as audio input (Windows fallback): {self.audio_pipe_path}")
+            except Exception as e:
+                self.error_signal.emit(f"Failed to create audio pipe/file: {e}")
+                # Do not return False here if video can still proceed without audio
+                self.audio_pipe_path = None # Ensure pipe path is None if creation failed
+                self.status_signal.emit("Warning: Audio pipe creation failed. Proceeding without audio if possible.")
+                # Fallback to no audio for FFmpeg if pipe failed
+                # self.audio_channels = 0 # This would modify the setting, maybe not desired.
+                                        # Instead, FFmpeg command will check audio_pipe_path.
+        elif self.audio_channels == 0:
+            self.status_signal.emit("FFmpeg: Audio channels set to 0 by configuration. Proceeding without audio input.")
+        else: # Sample rate might be 0 if channels > 0, or other invalid combo
+            self.error_signal.emit(f"FFmpeg: Audio parameters invalid (Sample Rate: {self.audio_sample_rate}Hz, Channels: {self.audio_channels}ch). Cannot configure audio.")
+            # Proceeding without audio if video params are fine
+            self.audio_pipe_path = None # Ensure no audio pipe is used
 
         command = [
             'ffmpeg',
@@ -170,33 +173,49 @@ class SRTStreamerThread(QThread):
             '-pix_fmt', 'bgr24',
             '-s', f'{self.frame_width}x{self.frame_height}',
             '-r', str(self.fps),
-            '-thread_queue_size', '512', # For video input
-            '-i', 'pipe:0', # Video from stdin
+            '-thread_queue_size', '512',
+            '-i', 'pipe:0',
+        ]
 
-            # Audio Input (from named pipe)
-            '-f', 'f32le', # NDI audio is float32 little-endian
-            '-ar', str(self.audio_sample_rate),
-            '-ac', str(self.audio_channels),
-            '-thread_queue_size', '512', # For audio input
-            '-i', self.audio_pipe_path,
+        # Add audio input to command ONLY if channels, sample rate, and pipe path are valid
+        if self.audio_channels > 0 and self.audio_sample_rate > 0 and self.audio_pipe_path:
+            command.extend([
+                # Audio Input (from named pipe/file)
+                '-f', 'f32le',
+                '-ar', str(self.audio_sample_rate),
+                '-ac', str(self.audio_channels),
+                '-thread_queue_size', '512',
+                '-i', self.audio_pipe_path,
+            ])
 
+        command.extend([
             # Video Codec
             '-c:v', 'libx264',
             '-preset', 'ultrafast',
             '-tune', 'zerolatency',
             '-pix_fmt', 'yuv420p',
-            '-b:v', '2500k', # Example bitrate
+            '-b:v', '2500k',
+        ])
 
-            # Audio Codec
-            '-c:a', 'aac',
-            '-b:a', '128k',
-            '-strict', '-2', # For some AAC versions, might not be needed
+        # Add audio codec to command ONLY if audio input was successfully added
+        if self.audio_channels > 0 and self.audio_sample_rate > 0 and self.audio_pipe_path:
+            command.extend([
+                # Audio Codec
+                '-c:a', 'aac',
+                '-b:a', '128k',
+                '-strict', '-2',
+            ])
+        else:
+            # No valid audio input, so tell FFmpeg to not output an audio track
+            command.extend(['-an'])
 
-            # Output Format (SRT)
-            '-f', 'mpegts', # MPEG-TS is commonly used for SRT
-            '-muxdelay', '0.1', # Reduce muxing delay
+
+        command.extend([
+            # Output Format (SRT using MPEG-TS container)
+            '-f', 'mpegts',
+            '-muxdelay', '0.1',
             self.srt_url
-        ]
+        ])
 
         self.status_signal.emit(f"Starting FFmpeg with command: {' '.join(command)}")
         try:
@@ -452,10 +471,6 @@ class SRTStreamerThread(QThread):
 
 class MainWindow(QMainWindow):
     def __init__(self):
-from PyQt5.QtWidgets import QTextEdit # For FFmpeg log display
-
-class MainWindow(QMainWindow):
-    def __init__(self):
         super().__init__()
         self.setWindowTitle("Video Streaming App")
         self.setGeometry(100, 100, 800, 700) # Increased height for log
@@ -473,9 +488,10 @@ class MainWindow(QMainWindow):
         # SRT Streamer Thread
         self.srt_streamer_thread = SRTStreamerThread()
 
-        # Audio parameters (primarily for NDI Loopback)
-        self.current_audio_sample_rate = 0
-        self.current_audio_channels = 0
+        # Audio parameters - these will be updated by the source thread (e.g. NDI Loopback)
+        # and then used to configure SRTStreamerThread before it starts FFmpeg.
+        self.current_pgm_audio_sample_rate = 0
+        self.current_pgm_audio_channels = 0
 
         # vMix Input Name Cache
         self.vmix_input_cache = {}
@@ -723,8 +739,6 @@ class MainWindow(QMainWindow):
         if self.toggle_stream_button.isChecked():
             selected_pgm_mode = self.pgm_source_combo.currentText()
 
-            # For NDI Loopback, source name comes from ndi_source_combo
-            # For NDI Virtual Input (OpenCV), source name/index comes from ndi_cam_index_input
             selected_ndi_source_name = ""
             if selected_pgm_mode == "NDI Loopback":
                 selected_ndi_source_name = self.ndi_source_combo.currentText()
@@ -742,32 +756,29 @@ class MainWindow(QMainWindow):
             self.toggle_stream_button.setText("Stop Streaming")
             self._stop_all_capture_threads()
 
-            srt_audio_sample_rate = 0
-            srt_audio_channels = 0
+            current_srt_audio_sample_rate = self.current_pgm_audio_sample_rate
+            current_srt_audio_channels = self.current_pgm_audio_channels
 
             if selected_pgm_mode == "NDI Loopback":
-                if self.current_audio_sample_rate > 0 and self.current_audio_channels > 0:
-                    srt_audio_sample_rate = self.current_audio_sample_rate
-                    srt_audio_channels = self.current_audio_channels
+                if current_srt_audio_channels > 0 and current_srt_audio_sample_rate > 0:
+                    self.srt_streamer_thread.set_audio_params(current_srt_audio_sample_rate, current_srt_audio_channels)
                 else:
-                    self.update_status_bar("Warning: NDI audio parameters not yet known. Using defaults for SRT (48kHz, 2ch).")
-                    srt_audio_sample_rate, srt_audio_channels = 48000, 2
-
-                self.srt_streamer_thread.set_audio_params(srt_audio_sample_rate, srt_audio_channels)
+                    self.update_status_bar("NDI Loopback: Audio params not yet known. SRT will start without audio.")
+                    self.srt_streamer_thread.set_audio_params(0, 0)
 
                 self.ndi_loopback_thread = NDILoopbackCaptureThread(ndi_source_name=selected_ndi_source_name)
                 self.ndi_loopback_thread.new_video_frame_signal.connect(self._handle_new_video_frame)
                 self.ndi_loopback_thread.new_video_frame_signal.connect(self.srt_streamer_thread.push_frame)
-                self.ndi_loopback_thread.new_audio_frame_signal.connect(self._handle_new_audio_frame)
+                self.ndi_loopback_thread.new_audio_frame_signal.connect(self.handle_new_ndi_audio_frame) # Corrected name
                 self.ndi_loopback_thread.status_signal.connect(self.update_status_bar)
                 self.ndi_loopback_thread.error_signal.connect(self.update_status_bar)
                 self.ndi_loopback_thread.ndi_info_signal.connect(self._handle_video_info_for_srt)
 
-                self.ndi_loopback_thread.start_capture()
+                self.ndi_loopback_thread.start()
                 self.update_status_bar(f"Starting NDI Loopback stream from: {selected_ndi_source_name}")
 
             elif selected_pgm_mode == "NDI Virtual Input (OpenCV)":
-                self.srt_streamer_thread.set_audio_params(48000, 0)
+                self.srt_streamer_thread.set_audio_params(0, 0)
 
                 self.ndi_opencv_thread = GenericOpenCVCaptureThread(ndi_source_name=selected_ndi_source_name)
                 self.ndi_opencv_thread.new_frame_signal.connect(self._handle_new_video_frame)
@@ -780,7 +791,7 @@ class MainWindow(QMainWindow):
                 self.update_status_bar(f"Starting NDI Virtual Input (OpenCV) from: {selected_ndi_source_name}")
 
             elif selected_pgm_mode == "vMix Virtual Camera":
-                self.srt_streamer_thread.set_audio_params(48000, 0)
+                self.srt_streamer_thread.set_audio_params(0, 0)
 
                 self.vmix_virtual_cam_thread = VmixVirtualCameraCaptureThread()
                 self.vmix_virtual_cam_thread.new_video_frame_signal.connect(self._handle_new_video_frame)
@@ -902,7 +913,7 @@ class MainWindow(QMainWindow):
             return False # Use existing cache, no refresh needed
 
         api_url = f"http://{self.VMIX_HOST}:{self.VMIX_HTTP_PORT}/api"
-        self.status_signal.emit(f"Fetching vMix input names from {api_url}...")
+        self.update_status_bar(f"Fetching vMix input names from {api_url}...")
 
         try:
             response = requests.get(api_url, timeout=1.0) # Increased timeout slightly for full API call
@@ -928,49 +939,41 @@ class MainWindow(QMainWindow):
                         number = int(number_str)
                         new_cache[number] = title
                     # else:
-                        # self.status_signal.emit(f"Skipping input: num='{number_str}', title='{title}'")
+                        # self.update_status_bar(f"Skipping input: num='{number_str}', title='{title}'")
                 except ValueError:
-                    self.error_signal.emit(f"Could not parse input number: '{input_element.get('number')}' as integer.")
+                    self.update_status_bar(f"Error: Could not parse input number: '{input_element.get('number')}' as integer.")
                 except Exception as e_parse: # Catch other potential errors during parsing of one input
-                    self.error_signal.emit(f"Error parsing a vMix input element: {e_parse}")
+                    self.update_status_bar(f"Error parsing a vMix input element: {e_parse}")
 
             if not new_cache and len(list(root.findall('.//inputs/input'))) > 0 : # Only error if inputs were present but none were parsable
-                 self.error_signal.emit("Inputs found in vMix API response, but failed to parse names/numbers for any.")
+                 self.update_status_bar("Error: Inputs found in vMix API response, but failed to parse names/numbers for any.")
                  # Do not wipe existing cache if the new fetch failed badly, unless no inputs are reported at all
                  # If vMix reports zero inputs (e.g. fresh preset), the cache should be cleared.
                  if not list(root.findall('.//inputs/input')): # No inputs in XML
                     self.vmix_input_cache = {}
                     self.last_input_cache_refresh_time = current_time # Reflect that an update (to empty) happened
-                    self.status_signal.emit("vMix reports no inputs. Cache cleared.")
+                    self.update_status_bar("vMix reports no inputs. Cache cleared.")
                  return False # Indicate refresh effectively failed or resulted in no data
 
             self.vmix_input_cache = new_cache # Replace cache with new data (or empty if no inputs)
             self.last_input_cache_refresh_time = current_time
             if new_cache :
-                self.status_signal.emit(f"vMix input names cache refreshed. Found {len(self.vmix_input_cache)} inputs.")
+                self.update_status_bar(f"vMix input names cache refreshed. Found {len(self.vmix_input_cache)} inputs.")
             elif not list(root.findall('.//inputs/input')): # No inputs in XML, cache is now empty
                  pass # Already emitted "vMix reports no inputs"
             else: # No inputs parsed, but XML did contain input elements
-                self.status_signal.emit("vMix input names cache updated, but no valid inputs/names were parsed.")
+                self.update_status_bar("vMix input names cache updated, but no valid inputs/names were parsed.")
 
             return True # Refresh attempt was made
 
         except requests.exceptions.RequestException as e:
-            self.error_signal.emit(f"Failed to fetch vMix input names: {e}")
+            self.update_status_bar(f"Error: Failed to fetch vMix input names: {e}")
         except ET.ParseError as e:
-            self.error_signal.emit(f"Failed to parse vMix API XML for input names: {e}")
+            self.update_status_bar(f"Error: Failed to parse vMix API XML for input names: {e}")
         except Exception as e: # Catch any other unexpected errors during the overall fetch process
-            self.error_signal.emit(f"Unexpected error fetching/processing vMix input names: {e}")
+            self.update_status_bar(f"Error: Unexpected error fetching/processing vMix input names: {e}")
 
         return False # Refresh failed
-
-
-        else: # Stop streaming
-            self.toggle_stream_button.setText("Start Streaming")
-            self._stop_all_capture_threads()
-            if self.srt_streamer_thread.isRunning():
-                self.srt_streamer_thread.stop()
-            self.update_status_bar("Streaming stopped.")
 
     def _stop_all_capture_threads(self): # Renamed from _stop_all_ndi_threads
         if self.ndi_loopback_thread and self.ndi_loopback_thread.isRunning():
@@ -1012,51 +1015,67 @@ class MainWindow(QMainWindow):
 
         # Update current audio parameters if they change or are set for the first time
         # This is primarily relevant for NDI Loopback audio.
-        if self.pgm_source_combo.currentText() == "NDI Loopback":
-            if self.current_audio_sample_rate != sample_rate or self.current_audio_channels != channels:
-                self.current_audio_sample_rate = sample_rate
-                self.current_audio_channels = channels
-                self.update_status_bar(f"NDI Audio Params Updated: {sample_rate}Hz, {channels}ch")
-                if self.srt_streamer_thread.isRunning():
-                    self.srt_streamer_thread.set_audio_params(sample_rate, channels)
-                    self.update_status_bar("Info: NDI audio parameters changed mid-stream. SRT streamer updated (FFmpeg may need restart for changes to take effect).")
+        # self.update_status_bar(f"Audio Frame (NDI): {audio_data.shape[0]} samples, {sample_rate}Hz, {channels}ch, TS: {timestamp_ns}") # Too verbose
+
+        source_mode = self.pgm_source_combo.currentText()
+
+        if source_mode == "NDI Loopback": # Only process if NDI Loopback is the active PGM source
+            params_changed = False
+            if self.current_pgm_audio_sample_rate != sample_rate or self.current_pgm_audio_channels != channels:
+                self.current_pgm_audio_sample_rate = sample_rate
+                self.current_pgm_audio_channels = channels
+                params_changed = True
+                self.update_status_bar(f"NDI Loopback Audio Params Updated: {sample_rate}Hz, {channels}ch")
+
+            srt_is_running = self.srt_streamer_thread.isRunning()
+
+            if params_changed and srt_is_running:
+                # If SRT is running AND its current audio config doesn't match the new NDI audio params.
+                if (self.srt_streamer_thread.audio_sample_rate != sample_rate or \
+                    self.srt_streamer_thread.audio_channels != channels):
+                    # This typically means FFmpeg needs a restart to pick up new format.
+                    self.update_status_bar("Info: NDI audio parameters changed mid-stream. SRT FFmpeg may need restart if format differs.")
 
             # Push audio data to SRT streamer only if SRT is running
-            if self.srt_streamer_thread.isRunning():
-                self.srt_streamer_thread.push_audio_frame(audio_data, sample_rate, channels, timestamp_ns)
+            if srt_is_running:
+                if self.srt_streamer_thread.audio_channels > 0: # If SRT was started with audio
+                    self.srt_streamer_thread.push_audio_frame(audio_data, sample_rate, channels, timestamp_ns)
+                elif self.current_pgm_audio_channels > 0 : # SRT started with no audio, but PGM now has audio
+                     self.update_status_bar("Info: Audio detected from NDI, but SRT started without audio. Restart stream to include audio.")
+            # If SRT not running, current_pgm_audio_... will be used when it starts.
 
-    def _handle_video_info_for_srt(self, video_info_str): # Renamed from _handle_ndi_video_info_for_srt
-        # Parses "Res: WxH, FPS: F" string from video capture threads
-        self.update_status_bar(f"Video Info: {video_info_str}")
+    def _handle_video_info_for_srt(self, video_info_str):
+        # Parses "1920x1080 @ 30.0 FPS" or "Res: 1920x1080, FPS: 30.0"
+        self.update_status_bar(f"Video Info for SRT: {video_info_str}")
         try:
-            parts = ndi_info_str.split(',')
-            res_part = parts[0].split(':')[1].strip() # Should be "Res: WxH"
-            fps_part = parts[1].split(':')[1].strip() # Should be "FPS: F"
+            w, h, fps_val = 0, 0, 0.0
 
-            w, h = map(int, res_part.split('x'))
-            fps = float(fps_part)
+            if "@" in video_info_str and "FPS" in video_info_str.upper(): # Format "1920x1080 @ 29.97 FPS"
+                res_part, fps_part = video_info_str.split('@')
+                w_str, h_str = res_part.strip().split('x')
+                w = int(w_str)
+                h = int(h_str)
+                fps_val_str = fps_part.upper().replace('FPS','').strip()
+                fps_val = float(fps_val_str)
+            elif "Res:" in video_info_str and "FPS:" in video_info_str: # Format "Res: WxH, FPS: F"
+                parts = video_info_str.split(',') #ndi_info_str was a typo here, should be video_info_str
+                res_str_part = parts[0].split(':')[1].strip()
+                fps_str_part = parts[1].split(':')[1].strip()
+                w, h = map(int, res_str_part.split('x'))
+                fps_val = float(fps_str_part)
+            else:
+                self.update_status_bar(f"Could not parse video info string for SRT: '{video_info_str}'")
+                return
 
-            self.srt_streamer_thread.set_video_params(w, h, fps)
+            if w <= 0 or h <= 0 or fps_val <= 0.0:
+                self.update_status_bar(f"Parsed video info resulted in non-positive values: W={w}, H={h}, FPS={fps_val}. Not setting for SRT.")
+                return
 
-            # Potentially, NDI info string could also include audio details in the future
-            # e.g., "Res: WxH, FPS: F, Audio: RateHz/Ch"
-            if len(parts) > 2: # Check if there's a third part for audio
-                audio_part = parts[2].strip()
-                if audio_part.startswith("Audio:"):
-                    audio_details = audio_part.split(':')[1].strip() # e.g., "48000Hz/2ch"
-                    rate_str, chans_str = audio_details.split('/')
-                    rate = int(rate_str.replace("Hz",""))
-                    chans = int(chans_str.replace("ch",""))
-                    if self.current_audio_sample_rate != rate or self.current_audio_channels != chans:
-                        self.current_audio_sample_rate = rate
-                        self.current_audio_channels = chans
-                        self.update_status_bar(f"NDI Audio Params (from info_str): {rate}Hz, {chans}ch")
-                        if self.srt_streamer_thread.isRunning(): # If already running, update params
-                            self.srt_streamer_thread.set_audio_params(rate, chans)
-
+            self.srt_streamer_thread.set_video_params(w, h, fps_val)
+            # Audio parameters are handled by handle_new_ndi_audio_frame
 
         except Exception as e:
-            self.update_status_bar(f"Error parsing NDI info string '{ndi_info_str}': {e}")
+            self.update_status_bar(f"Error parsing video info string '{video_info_str}' for SRT: {e}")
 
 
     def update_status_bar(self, message):
@@ -1102,14 +1121,14 @@ class MainWindow(QMainWindow):
             try:
                 os.makedirs(config_dir, exist_ok=True)
             except Exception as e:
-                self.error_signal.emit(f"Error creating config directory {config_dir}: {e}")
+                self.update_status_bar(f"Error creating config directory {config_dir}: {e}") # Changed to update_status_bar
                 # Fallback to current directory if user's config dir is not writable/creatable
                 return os.path.join(".", "pd_app_config.json")
         return os.path.join(config_dir, "pd_app_config.json")
 
     def _save_config(self):
         config_path = self._get_config_path()
-        self.status_signal.emit(f"Saving configuration to {config_path}...")
+        self.update_status_bar(f"Saving configuration to {config_path}...") # Changed to update_status_bar
 
         # Gather NDI Loopback source name carefully
         ndi_loopback_source = ""
@@ -1134,18 +1153,18 @@ class MainWindow(QMainWindow):
         try:
             with open(config_path, 'w') as f:
                 json.dump(config_data, f, indent=4)
-            self.status_signal.emit("Configuration saved.")
+            self.update_status_bar("Configuration saved.") # Changed to update_status_bar
         except IOError as e:
-            self.error_signal.emit(f"Error saving configuration: {e}")
+            self.update_status_bar(f"Error saving configuration: {e}") # Changed to update_status_bar
         except Exception as e: # Catch any other unexpected errors
-            self.error_signal.emit(f"Unexpected error saving configuration: {e}")
+            self.update_status_bar(f"Unexpected error saving configuration: {e}") # Changed to update_status_bar
 
 
     def _load_config(self):
         config_path = self._get_config_path()
-        self.status_signal.emit(f"Loading configuration from {config_path}...")
+        self.update_status_bar(f"Loading configuration from {config_path}...") # Changed to update_status_bar
         if not os.path.exists(config_path):
-            self.status_signal.emit("Configuration file not found. Using default settings.")
+            self.update_status_bar("Configuration file not found. Using default settings.") # Changed to update_status_bar
             # Apply defaults to UI elements that might not have them set by constructor
             self.pgm_source_combo.setCurrentText(self.DEFAULT_PGM_MODE)
             self.tally_mode_combo.setCurrentText(self.DEFAULT_TALLY_MODE)
@@ -1181,14 +1200,14 @@ class MainWindow(QMainWindow):
             # We can store it in a member variable to be used by toggle_tally_connection.
             self.loaded_http_tally_poll_ms = config_data.get('http_tally_poll_interval_ms', self.DEFAULT_HTTP_TALLY_POLL_MS)
 
-            self.status_signal.emit("Configuration loaded.")
+            self.update_status_bar("Configuration loaded.") # Changed to update_status_bar
 
         except IOError as e:
-            self.error_signal.emit(f"Error loading configuration file: {e}")
+            self.update_status_bar(f"Error loading configuration file: {e}") # Changed to update_status_bar
         except json.JSONDecodeError as e:
-            self.error_signal.emit(f"Error decoding configuration file (JSON invalid): {e}")
+            self.update_status_bar(f"Error decoding configuration file (JSON invalid): {e}") # Changed to update_status_bar
         except Exception as e: # Catch any other unexpected errors
-            self.error_signal.emit(f"Unexpected error loading configuration: {e}")
+            self.update_status_bar(f"Unexpected error loading configuration: {e}") # Changed to update_status_bar
 
     # --- End Configuration Management ---
 
